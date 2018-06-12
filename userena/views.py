@@ -1,5 +1,5 @@
-from django.core.urlresolvers import reverse
-from django.shortcuts import redirect, get_object_or_404
+from django.urls import reverse
+from django.shortcuts import redirect, get_object_or_404,render
 from django.contrib.auth import authenticate, login, logout, REDIRECT_FIELD_NAME
 from django.contrib.auth import get_user_model
 from django.contrib.auth.forms import PasswordChangeForm
@@ -9,10 +9,10 @@ from django.views.generic.list import ListView
 from django.contrib import messages
 from django.core.exceptions import PermissionDenied
 from django.utils.translation import ugettext as _
-from django.http import Http404, HttpResponseRedirect
+from django.http import Http404, HttpResponseRedirect,HttpResponse
 
 from userena.forms import (SignupForm, SignupFormOnlyEmail, AuthenticationForm,
-                           ChangeEmailForm, EditProfileForm)
+                           ChangeEmailForm, EditProfileForm,InviteForm)
 from userena.models import UserenaSignup
 from userena.decorators import secure_required
 from userena.utils import signin_redirect, get_profile_model, get_user_profile
@@ -20,6 +20,7 @@ from userena import signals as userena_signals
 from userena import settings as userena_settings
 
 from guardian.decorators import permission_required_or_403
+from django.contrib.auth.decorators import login_required
 
 import warnings
 
@@ -35,6 +36,39 @@ class ExtraContextTemplateView(TemplateView):
 
     # this view is used in POST requests, e.g. signup when the form is not valid
     post = TemplateView.get
+
+class InvitedUsersListView(ListView):
+    """ Lists all profiles """
+    context_object_name='invited_user_list'
+    page=1
+    paginate_by=50
+    template_name='userena/list_invited_users.html'
+    extra_context=None
+
+
+    def get_context_data(self, **kwargs):
+        # Call the base implementation first to get a context
+        context = super(InvitedUsersListView, self).get_context_data(**kwargs)
+        try:
+            page = int(self.request.GET.get('page', None))
+        except (TypeError, ValueError):
+            page = self.page
+
+        if not self.extra_context: self.extra_context = dict()
+
+        context['page'] = page
+        context['paginate_by'] = self.paginate_by
+        context['extra_context'] = self.extra_context
+        profile_model= get_profile_model()
+        currentProfile=profile_model.objects.get(user=self.request.user)
+        context['numOfRemainingInvitationTicket']= currentProfile.get_remaining_invite_tickets_number()
+        return context
+
+    def get_queryset(self):
+        profile_model= get_profile_model()
+        currentProfile=profile_model.objects.get(user=self.request.user)
+        queryset = currentProfile.invited_users.all()
+        return queryset
 
 class ProfileListView(ListView):
     """ Lists all profiles """
@@ -68,6 +102,36 @@ class ProfileListView(ListView):
         profile_model = get_profile_model()
         queryset = profile_model.objects.get_visible_profiles(self.request.user).select_related()
         return queryset
+
+@secure_required
+@login_required
+def invite_new_user(request,invite_form=InviteForm,template_name='userena/invite_new_user.html',success_url='userena_list_invited_users',extra_context=None):
+    if(request.user.has_perm('invite_user')):
+        if not extra_context:
+            extra_context = dict()
+
+        if request.method == 'POST':
+                form = invite_form(request.user,request.POST, request.FILES)
+                if form.is_valid():
+                    result=form.save()
+                    if result: #if result is True everythin was ok
+                        return redirect(success_url)
+                    else:
+                        return HttpResponse(status=500)
+                extra_context['form'] = form
+                return ExtraContextTemplateView.as_view(template_name=template_name,
+                                                extra_context=extra_context)(request)
+        form=invite_form(request.user)
+        extra_context['form'] = form
+        return ExtraContextTemplateView.as_view(template_name=template_name,
+                                                extra_context=extra_context)(request)
+    else:
+        raise PermissionDenied
+
+@secure_required
+@login_required
+def list_invited_users(request,template_name='userena/list_invited_users.html'):
+    return InvitedUsersListView.as_view(template_name=template_name)(request)
 
 @secure_required
 def signup(request, signup_form=SignupForm,
@@ -264,6 +328,82 @@ def activate_retry(request, activation_key,
         return redirect(reverse('userena_activate',args=(activation_key,)))
 
 @secure_required
+def activate_invited_user(request, invitation_key,
+             template_name='userena/invite_fail.html',
+             retry_template_name='userena/invite_retry.html',
+             success_url=None, extra_context=None):
+    """
+    Activate an invited  user with an invitation key.
+
+    The key is a SHA1 string. When the SHA1 is found with an
+    :class:`UserenaSignup`, the :class:`User` of that account will be
+    activated.  After a successful activation the view will redirect to
+    ``success_url``.  If the SHA1 is not found, the user will be shown the
+    ``template_name`` template displaying a fail message.
+    If the SHA1 is found but expired, ``retry_template_name`` is used instead,
+    so the user can proceed to :func:`activate_retry` to get a new activation key.
+
+    :param invitation_key:
+        String of a SHA1 string of 40 characters long. A SHA1 is always 160bit
+        long, with 4 bits per character this makes it --160/4-- 40 characters
+        long.
+
+    :param template_name:
+        String containing the template name that is used when the
+        ``activation_key`` is invalid and the activation fails. Defaults to
+        ``userena/activate_fail.html``.
+
+    :param retry_template_name:
+        String containing the template name that is used when the
+        ``activation_key`` is expired. Defaults to
+        ``userena/activate_retry.html``.
+
+    :param success_url:
+        String containing the URL where the user should be redirected to after
+        a successful activation. Will replace ``%(username)s`` with string
+        formatting if supplied. If ``success_url`` is left empty, will direct
+        to ``userena_profile_detail`` view.
+
+    :param extra_context:
+        Dictionary containing variables which could be added to the template
+        context. Default to an empty dictionary.
+
+    """
+    try:
+        if (not UserenaSignup.objects.check_expired_invitation(invitation_key)
+            or not userena_settings.USERENA_ACTIVATION_RETRY):
+            user = UserenaSignup.objects.activate_invited_user(invitation_key)
+            if user:
+                # Sign the user in.
+                auth_user = authenticate(identification=user.email,
+                                         check_password=False)
+                login(request, auth_user)
+
+                if userena_settings.USERENA_USE_MESSAGES:
+                    messages.success(request, _('Your account has been activated and you have been signed in.'),
+                                     fail_silently=True)
+
+                if success_url: redirect_to = success_url % {'username': user.username }
+                else: redirect_to = reverse('userena_profile_detail',
+                                            kwargs={'username': user.username})
+                return redirect(redirect_to)
+            else:
+                if not extra_context: extra_context = dict()
+                return ExtraContextTemplateView.as_view(template_name=template_name,
+                                                        extra_context=extra_context)(
+                                        request)
+        else:
+            if not extra_context: extra_context = dict()
+            extra_context['invitation_key'] = invitation_key
+            return ExtraContextTemplateView.as_view(template_name=retry_template_name,
+                                                extra_context=extra_context)(request)
+    except UserenaSignup.DoesNotExist:
+        if not extra_context: extra_context = dict()
+        return ExtraContextTemplateView.as_view(template_name=template_name,
+                                                extra_context=extra_context)(request)
+
+
+@secure_required
 def email_confirm(request, confirmation_key,
                   template_name='userena/email_confirm_fail.html',
                   success_url=None, extra_context=None):
@@ -457,7 +597,7 @@ def signin(request, auth_form=AuthenticationForm,
                 redirect_to = redirect_signin_function(
                     request.GET.get(redirect_field_name,
                                     request.POST.get(redirect_field_name)), user)
-                return HttpResponseRedirect(redirect_to)
+                return redirect(redirect_to)
             else:
                 return redirect(reverse('userena_disabled',
                                         kwargs={'username': user.username}))
@@ -490,7 +630,7 @@ def signout(request, next_page=userena_settings.USERENA_REDIRECT_ON_SIGNOUT,
     if request.user.is_authenticated() and userena_settings.USERENA_USE_MESSAGES: # pragma: no cover
         messages.success(request, _('You have been signed out.'), fail_silently=True)
     userena_signals.account_signout.send(sender=None, user=request.user)
-    return Signout(request, next_page, template_name, *args, **kwargs)
+    return Signout(request, next_page=next_page, template_name=template_name, *args, **kwargs)
 
 @secure_required
 @permission_required_or_403('change_user', (get_user_model(), 'username', 'username'))

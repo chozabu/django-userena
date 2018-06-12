@@ -8,7 +8,7 @@ from django.contrib.auth import authenticate
 
 from userena import settings as userena_settings
 from userena.models import UserenaSignup
-from userena.utils import get_profile_model
+from userena.utils import get_profile_model,get_user_profile
 
 from hashlib import sha1
 import random
@@ -40,7 +40,7 @@ class SignupForm(forms.Form):
                              label=_("Email"))
     password1 = forms.CharField(widget=forms.PasswordInput(attrs=attrs_dict,
                                                            render_value=False),
-                                label=_("Create password"))
+                                label=_("Enter password"))
     password2 = forms.CharField(widget=forms.PasswordInput(attrs=attrs_dict,
                                                            render_value=False),
                                 label=_("Repeat password"))
@@ -254,3 +254,30 @@ class EditProfileForm(forms.ModelForm):
         user.save()
 
         return profile
+
+class InviteForm(forms.Form):
+    email = forms.EmailField(widget=forms.TextInput(attrs=dict(attrs_dict,
+                                                   maxlength=75)),
+                                                   label=_("Email"))
+
+    def __init__(self, user, *args, **kwargs):
+            self.user = user
+            super(InviteForm, self).__init__(*args, **kwargs)
+
+    def clean_email(self):
+        """ Validate that the email is not already registered with another user """
+        if get_user_model().objects.filter(email__iexact=self.cleaned_data['email']):
+            raise forms.ValidationError(_('This email is already in use. Please supply a different email.'))
+        return self.cleaned_data['email']
+    def clean(self):
+        currentProfile=get_user_profile(user=self.user)
+        if(currentProfile.get_remaining_invite_tickets_number()<=0):
+            raise forms.ValidationError(_('Max number of invitation tickets reached. You should delete some of your current tickets or add tickets.'))
+    def save(self,*args,**kwargs):
+        profile_model=get_profile_model()
+        try:
+            current_profile=profile_model.objects.get(user=self.user)
+        except profile_model.DoesNotExist:
+            return False
+        result=UserenaSignup.objects.invite_user(inviter=current_profile,invited_email=self.cleaned_data['email'])
+        return result

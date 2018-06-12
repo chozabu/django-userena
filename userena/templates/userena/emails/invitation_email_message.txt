@@ -1,0 +1,11 @@
+{% load i18n %}{% autoescape off %}
+ {{ inviter.username }} has invited you to {{site.name}} 
+{% trans "To activate your account you should click on the link below:" %}
+
+{{ protocol }}://{{ site.domain }}{% url 'userena_activate_invited_user' invitation_key %}
+
+{% trans "Serving you is our pleasure!" %}
+
+{% trans "Sincerely" %},
+{{ site.name }}
+{% endautoescape %}

@@ -13,11 +13,13 @@ from userena.managers import UserenaManager, UserenaBaseProfileManager
 from userena.utils import get_gravatar, generate_sha1, get_protocol, \
     get_datetime_now, user_model_label
 import datetime
+from userena.utils import get_user_profile
 from .mail import UserenaConfirmationMail
 
 
 PROFILE_PERMISSIONS = (
             ('view_profile', 'Can view profile'),
+            ('invite_user', 'Can invite user'),
 )
 
 
@@ -48,7 +50,8 @@ class UserenaSignup(models.Model):
     """
     user = models.OneToOneField(user_model_label,
                                 verbose_name=_('user'),
-                                related_name='userena_signup')
+                                related_name='userena_signup',
+                                on_delete= models.CASCADE)
 
     last_active = models.DateTimeField(_('last active'),
                                        blank=True,
@@ -56,6 +59,10 @@ class UserenaSignup(models.Model):
                                        help_text=_('The last date that the user was active.'))
 
     activation_key = models.CharField(_('activation key'),
+                                      max_length=40,
+                                      blank=True)
+
+    invitation_key = models.CharField(_('invitation key'),
                                       max_length=40,
                                       blank=True)
 
@@ -74,6 +81,9 @@ class UserenaSignup(models.Model):
     email_confirmation_key_created = models.DateTimeField(_('creation date of email confirmation key'),
                                                           blank=True,
                                                           null=True)
+
+    INVITATION_STATUS_CHOICES = (('INV','Invitation Mail was sent'),('PSWRST','Password was reset by user'),('PRFEDIT','Profile was edited by user'))
+    invitation_status= models.CharField(max_length=7,choices=INVITATION_STATUS_CHOICES,default='INV')
 
     objects = UserenaManager()
 
@@ -175,6 +185,46 @@ class UserenaSignup(models.Model):
         mailer.generate_mail("activation")
         mailer.send_mail(self.user.email)
 
+    def invitation_key_expired(self):
+        """
+        Checks if invitation key is expired.
+
+        Returns ``True`` when the ``invitation_key`` of the user is expired and
+        ``False`` if the key is still valid.
+
+        The key is expired when it's set to the value defined in
+        ``USERENA_ACTIVATED`` or ``invitation_key_created`` is beyond the
+        amount of days defined in ``USERENA_ACTIVATION_DAYS``.
+
+        """
+        expiration_days = datetime.timedelta(days=userena_settings.USERENA_ACTIVATION_DAYS)
+        expiration_date = self.user.date_joined + expiration_days
+        #iif self.invitation_key == userena_settings.USERENA_ACTIVATED:
+        #    return True
+        if get_datetime_now() >= expiration_date:
+            return True
+        return False
+
+    def send_invitation_email(self):
+        """
+        Sends a invitation email to the user.
+
+        This email is send when the user wants to invite their newly created
+        user.
+
+        """
+        context = {'img_url' : get_user_profile(user=self.user).get_mugshot_url(),
+                'inviter': get_user_profile(self.user).invitedBy.user,
+                'without_usernames': userena_settings.USERENA_WITHOUT_USERNAMES,
+                'protocol': get_protocol(),
+                'activation_days': userena_settings.USERENA_ACTIVATION_DAYS,
+                'invitation_key': self.invitation_key,
+                'site': Site.objects.get_current()}
+
+        mailer = UserenaConfirmationMail(context=context)
+        mailer.generate_mail("invitation")
+        mailer.send_mail(self.user.email)
+
 
 @python_2_unicode_compatible
 class UserenaBaseProfile(models.Model):
@@ -200,6 +250,10 @@ class UserenaBaseProfile(models.Model):
                                choices=PRIVACY_CHOICES,
                                default=userena_settings.USERENA_DEFAULT_PRIVACY,
                                help_text=_('Designates who can view your profile.'))
+
+    maxNumberOfInvitationTicket = models.IntegerField(default=3)
+
+    invitedBy = models.ForeignKey('self',on_delete=models.SET_NULL,null=True,blank=True,related_name='invited_users' )
 
     objects = UserenaBaseProfileManager()
 
@@ -334,6 +388,12 @@ class UserenaBaseProfile(models.Model):
 
         # Fallback to closed profile.
         return False
+    def get_remaining_invite_tickets_number(self):
+        if(self.user.has_perm('invite_user')):
+            return self.maxNumberOfInvitationTicket-self.invited_users.all().count()
+        return 0
+
+
 
 
 class UserenaLanguageBaseProfile(UserenaBaseProfile):

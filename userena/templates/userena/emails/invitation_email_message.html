@@ -1,0 +1,18 @@
+{% load i18n %}{% autoescape off %}
+<html>
+<body>
+	<p>{{ inviter.username }} has invited you to {{site.name}} </p>
+	<p>
+	 {% trans "To activate your account you should click on the link below:" %}<br/>
+	{{ protocol }}://{{ site.domain }}{% url 'userena_activate_invited_user' invitation_key %}
+
+	</p>
+	<p>
+	{% trans "Serving you is our pleasure!" %}<br/>
+
+	{% trans "Sincerely" %},<br/>
+	{{ site.name }}
+	</p>
+</body>
+</html>
+{% endautoescape %}

@@ -16,6 +16,7 @@ from userena import signals as userena_signals
 
 from guardian.shortcuts import assign_perm, get_perms
 
+from django.utils.crypto import get_random_string
 
 
 import re
@@ -34,6 +35,81 @@ ASSIGNED_PERMISSIONS = {
 
 class UserenaManager(UserManager):
     """ Extra functionality for the Userena model. """
+    def invite_user(self,inviter,invited_email):
+        if inviter.get_remaining_invite_tickets_number()>0 :
+            password=self.make_random_password()#et_random_string()
+            invitedUser = get_user_model().objects.create_user(
+                    invited_email.replace('@','-'),invited_email,password )
+            invitedUser.is_active = False
+            invitedUser.save()
+            # Give permissions to view and change profile
+            for perm in ASSIGNED_PERMISSIONS['profile']:
+                assign_perm(perm[0], invitedUser, get_user_profile(user=invitedUser))
+
+            # Give permissions to view and change itself
+            for perm in ASSIGNED_PERMISSIONS['user']:
+                assign_perm(perm[0], invitedUser, invitedUser)
+
+            invitedUserSignupInfo = self.create_userena_profile(invitedUser)
+            invitedUserSignupInfo.invite_status='INV' # user is invited
+            invitedProfile=get_user_profile(user=invitedUser)
+            inviter.invited_users.add(invitedProfile)
+            invitedUserSignupInfo.send_invitation_email()
+            return True
+        else:
+            return False
+
+    def check_expired_invitation(self, invitation_key):
+        """
+        Check if ``invitation_key`` is still valid.
+
+        Raises a ``self.model.DoesNotExist`` exception if key is not present or
+         ``activation_key`` is not a valid string
+
+        :param invitation_key:
+            String containing the secret SHA1 for a valid activation.
+
+        :return:
+            True if the ket has expired, False if still valid.
+
+        """
+        if SHA1_RE.search(invitation_key):
+            userena = self.get(invitation_key=invitation_key)
+            return userena.invitation_key_expired()
+        raise self.model.DoesNotExist
+
+    def activate_invited_user(self, invitation_key):
+        """
+        Activate an :class:`User` by supplying a valid ``activation_key``.
+
+        If the key is valid and an user is found, activates the user and
+        return it. Also sends the ``activation_complete`` signal.
+
+        :param activation_key:
+            String containing the secret SHA1 for a valid activation.
+
+        :return:
+            The newly activated :class:`User` or ``False`` if not successful.
+
+        """
+        if SHA1_RE.search(invitation_key):
+            try:
+                userena = self.get(invitation_key=invitation_key)
+            except self.model.DoesNotExist:
+                return False
+            if not userena.invitation_key_expired():
+                userena.invitation_key = userena_settings.USERENA_ACTIVATED
+                user = userena.user
+                user.is_active = True
+                userena.save(using=self._db)
+                user.save(using=self._db)
+
+                # Send the activation_complete signal
+                userena_signals.activation_complete.send(sender=None,
+                                                         user=user)
+
+                return user
+        return False
 
     def create_user(self, username, email, password, active=False,
                     send_email=True):
@@ -95,12 +171,13 @@ class UserenaManager(UserManager):
         if isinstance(user.username, text_type):
             user.username = smart_text(user.username)
         salt, activation_key = generate_sha1(user.username)
-
+        salt, invitation_key = generate_sha1(user.username)
         try:
             profile = self.get(user=user)
         except self.model.DoesNotExist:
             profile = self.create(user=user,
-                           activation_key=activation_key)
+                           activation_key=activation_key,
+                           invitation_key=invitation_key)
         return profile
 
     def reissue_activation(self, activation_key):
