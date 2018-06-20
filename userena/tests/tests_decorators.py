@@ -1,5 +1,5 @@
 from django.test import TestCase
-from django.core.urlresolvers import reverse
+from django.urls import reverse
 
 from userena.utils import get_gravatar
 from userena import settings as userena_settings
